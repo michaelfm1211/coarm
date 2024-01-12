@@ -19,7 +19,7 @@ all: kernel.img $(TOOLS)
 .PHONY: debug
 debug: CFLAGS += -O0 -g -DDEBUG
 debug: TOOLS_CFLAGS += -g -fsanitize=address -fsanitize=undefined -DDEBUG
-debug: kernel.elf $(TOOLS)
+debug: kernel.img $(TOOLS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -o $@ $^

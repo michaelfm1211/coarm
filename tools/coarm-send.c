@@ -1,9 +1,10 @@
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
-#include <stdint.h>
+#include <sys/fcntl.h>
 #include <termios.h>
+#include <unistd.h>
 
 #define PROTO_VERSION "COARM000"
 
@@ -20,31 +21,16 @@ int set_tty_attrs(int serial) {
     perror("cfsetispeed()");
     return -1;
   }
-  if (cfsetospeed(&tty, 0) < 0) {
+  if (cfsetospeed(&tty, B115200) < 0) {
     perror("cfsetospeed()");
     return -1;
   }
 
-  // no break processing or flow control
-  tty.c_iflag &= ~IGNBRK;
-  tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-  
-  // no remapping or delays
-  tty.c_oflag = 0;
-
-  // 8N1, no control, enable receiver
-  tty.c_cflag = (tty.c_cflag & ~CSIZE) | CS8;
-  tty.c_cflag &= ~(CSTOPB);
-  tty.c_cflag &= ~(PARENB | PARODD);
-  tty.c_cflag &= CLOCAL;
-  tty.c_cflag &= CREAD;
-
-  // disable signals, canonical mode, echo
-  tty.c_lflag = 0;
-
-  // no minimum number of bytes for read, set timeout for read to .5 seconds
-  tty.c_cc[VMIN] = 255;
-  tty.c_cc[VTIME] = 5;
+  // raw terminal, no parity, block on read until data is ready, no time limit
+  cfmakeraw(&tty);
+  tty.c_cflag &= ~CSTOPB;
+  tty.c_cc[VMIN] = 1;
+  tty.c_cc[VTIME] = 0;
 
   // write terminal settings
   if (tcsetattr(serial, TCSANOW, &tty) < 0) {
@@ -55,9 +41,31 @@ int set_tty_attrs(int serial) {
   return 0;
 }
 
+int block_read(int fd, char *buf, int bytes) {
+#ifdef DEBUG
+  fprintf(stderr, "attempting to read %d bytes\n", bytes);
+#endif
+  while (bytes) {
+    int len = read(fd, buf, bytes);
+    if (len < 0) {
+      perror("read");
+      return -1;
+    }
+#ifdef DEBUG
+    fprintf(stderr, "\tread %d bytes\n", len);
+    for (int i = 0; i < len; i++) {
+      fprintf(stderr, "\t\t%02x\n", *((uint8_t *)buf + i));
+    }
+#endif
+    bytes -= len;
+    buf += len;
+  }
+  return 0;
+}
+
 int main(int argc, char *argv[]) {
   char buf[1024] = {0};
-  int readlen = 0;
+  int writelen = 0;
 
   // usage
   if (argc != 2) {
@@ -66,7 +74,7 @@ int main(int argc, char *argv[]) {
   }
 
   // open the device file
-  int serial = open(argv[1], O_RDWR | O_EXLOCK);
+  int serial = open(argv[1], O_RDWR | O_NOCTTY | O_SYNC);
   if (serial < 0) {
     perror("open()");
     return 1;
@@ -80,27 +88,28 @@ int main(int argc, char *argv[]) {
     close(serial);
     return 1;
   }
+#ifdef DEBUG
+  fprintf(stderr, "configured tty\n");
+#endif
 
   // send ready signal
   *buf = 'R';
-  if (write(serial, buf, 1) < 0) {
+  if ((writelen = write(serial, buf, 1)) < 0) {
     perror("write()");
     close(serial);
     return 1;
   }
 #ifdef DEBUG
-  fprintf(stderr, "sent ready signal\n");
+  fprintf(stderr, "sent ready signal (%d bytes)\n", writelen);
 #endif
 
   // read the version string and UART implementation addresses
-  if ((readlen = read(serial, buf, 16)) < 0) {
-    perror("read()");
+  if (block_read(serial, buf, 16) < 0) {
     close(serial);
     return 1;
   }
 #ifdef DEBUG
   fprintf(stderr, "received version string and UART implementation\n");
-  fprintf(stderr, "\tgot %d bytes\n", readlen);
   fprintf(stderr, "\tversion: %.8s\n", buf);
   fprintf(stderr, "\tuart_rx(): 0x%x\n", *(uint32_t *)(buf + 8));
   fprintf(stderr, "\tuart_tx(): 0x%x\n", *(uint32_t *)(buf + 12));
@@ -115,12 +124,19 @@ int main(int argc, char *argv[]) {
 #endif
 
   // copy stdin to the serial connection, then send EOT
+  int readlen = 0;
   while ((readlen = read(0, buf, 1024)) > 0) {
-    if (write(serial, buf, readlen) < 0) {
+#ifdef DEBUG
+    fprintf(stderr, "read %d bytes of code from stdin...\n", readlen);
+#endif
+    if ((writelen = write(serial, buf, readlen)) < 0) {
       perror("write()");
       close(serial);
       return 1;
     }
+#ifdef DEBUG
+    fprintf(stderr, "...sent %d bytes of code\n", writelen);
+#endif
   }
   if (readlen < 0) {
     perror("read()");
@@ -128,25 +144,28 @@ int main(int argc, char *argv[]) {
     return 1;
   }
   strncpy(buf, "\x04\x04\x04\x04", 4);
-  if (write(serial, buf, 4) < 0) {
+  if ((writelen = write(serial, buf, 4)) < 0) {
     perror("write()");
     close(serial);
     return 1;
   }
 #ifdef DEBUG
-  fprintf(stderr, "finished sending code to device\n");
+  fprintf(stderr, "sent end of transmission (%d bytes)\n", writelen);
 #endif
 
   // read the EOT and return code from the serial connection. we don't have to
   // worry about anything else because we didn't give the user code access to
   // the UART implementations.
-  if (read(serial, buf, 8) < 0) {
-    perror("read()");
+  if (block_read(serial, buf, 8) < 0) {
     close(serial);
     return 1;
   }
 #ifdef DEBUG
-  fprintf(stderr, "read end of transmission and return value\n");
+  fprintf(stderr, "received end of transmission and return value\n");
+  fprintf(stderr, "\t%02x %02x %02x %02x\n", *(uint8_t *)buf,
+          *((uint8_t *)buf + 1), *((uint8_t *)buf + 2), *((uint8_t *)buf + 3));
+  fprintf(stderr, "\t%02x %02x %02x %02x\n", *((uint8_t *)buf + 4),
+          *((uint8_t *)buf + 5), *((uint8_t *)buf + 6), *((uint8_t *)buf + 7));
 #endif
 
   close(serial);

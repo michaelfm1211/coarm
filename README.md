@@ -32,13 +32,16 @@ generate a `.o` object file, use `ld.lld` with the `--oformat binary` option to
 convert the object file into a raw binary format, then use the `coarm-send`
 client tool provided by this project to send the raw binary.
 
+`coarm-send` requires using a call out device file. On macOS, call out devices
+are prepended with "cu" rather than "tty".
+
 An example of using `clang`/`ld.lld` to create a raw binary output is in the
 `example` subdirectory. Once you have a raw binary, you can use the `coarm-send`
 like below to send it to the Raspberry Pi. The example below assumes
-`/dev/ttys001` is the serial device of your Raspberry Pi and `code.bin` is your
-raw binary:
+`/dev/cu.usbserial-14130` is the serial device of your Raspberry Pi and
+`code.bin` is your raw binary:
 ```
-coarm-send /dev/ttys001 < code.bin
+coarm-send /dev/cu.usbserial-14130 < code.bin
 ```
 This command will exit with the value returned by the ARM code. If you're using
 the code in the `example` subdirectory, then it should return `11`. If you
